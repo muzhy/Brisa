@@ -3,7 +3,6 @@ package middleware
 import (
 	"brisa"
 	"fmt"
-	"log"
 	"net"
 )
 
@@ -36,20 +35,20 @@ func NewIPBlacklistHandler(config IPBlacklistConfig) (brisa.Handler, error) {
 		blockedIPs[ip.String()] = struct{}{}
 	}
 
-	log.Printf("IP Blacklist middleware initialized with %d single IPs and %d networks", len(blockedIPs), len(blockedNets))
-
 	// Return the actual middleware function (a closure)
 	return func(ctx *brisa.Context) brisa.Action {
 		clientIP := ctx.Session.GetClientIP().(*net.TCPAddr).IP
 
 		if _, found := blockedIPs[clientIP.String()]; found {
-			log.Printf("IP %s rejected by blacklist (exact match)", clientIP)
+			// log.Printf("IP %s rejected by blacklist (exact match)", clientIP)
+			ctx.Logger().Info("IP rejected by blacklist (exact match)", "ip", clientIP)
 			return brisa.Reject
 		}
 
 		for _, network := range blockedNets {
 			if network.Contains(clientIP) {
-				log.Printf("IP %s rejected by blacklist (network match: %s)", clientIP, network)
+				// log.Printf("IP %s rejected by blacklist (network match: %s)", clientIP, network)
+				ctx.Logger().Info("IP rejected by blacklist (network match)", "ip", clientIP, "network", network)
 				return brisa.Reject
 			}
 		}
