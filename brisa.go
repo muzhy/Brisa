@@ -3,7 +3,7 @@ package brisa
 import (
 	"errors"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"sync/atomic"
 
@@ -19,13 +19,21 @@ var (
 // Brisa implements SMTP server methods.
 type Brisa struct {
 	chains atomic.Pointer[middlewareChains]
+	logger *slog.Logger
 }
 
 // New creates a new Brisa instance with initial middleware chains.
-func New() *Brisa {
-	b := &Brisa{}
+func New(logger *slog.Logger) *Brisa {
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	b := &Brisa{
+		logger: logger,
+	}
 	// Initialize with empty chains.
 	b.chains.Store(NewMiddlewareChains())
+
 	return b
 }
 
@@ -33,20 +41,27 @@ func New() *Brisa {
 // This is the method you would call when your configuration changes.
 func (b *Brisa) UpdateChains(set *middlewareChains) {
 	b.chains.Store(set)
-	log.Println("Middleware chains updated")
+	b.logger.Info("Middleware chains updated")
 }
 
 // NewSession is called after client greeting (EHLO, HELO).
 func (b *Brisa) NewSession(c *smtp.Conn) (smtp.Session, error) {
+	id := uuid.NewString()
+	ctx := NewContext()
+	ctx.logger = b.logger.With("session_id", id)
+
 	s := &Session{
+		ctx:    ctx,
+		id:     id,
 		conn:   c,
 		chains: b.chains.Load(),
 	}
-	s.init()
+	// Link session back to context
+	s.ctx.Session = s
 
 	// Execute connection-level middleware immediately.
-	if action := s.chains.ConnChain.execute(s.ctx); action == Reject {
-		log.Printf("[%s] Connection rejected by middleware from %s", s.id, c.Conn().RemoteAddr())
+	if action := s.chains.ConnChain.execute(ctx); action == Reject {
+		ctx.Logger().Warn("Connection rejected by middleware")
 		return nil, ErrRejected
 	}
 
@@ -60,12 +75,6 @@ type Session struct {
 	chains *middlewareChains
 }
 
-func (s *Session) init() {
-	s.id = uuid.NewString() // Generate a unique ID
-	s.ctx = NewContext()
-	s.ctx.Session = s
-}
-
 func (s *Session) GetClientIP() net.Addr {
 	return s.conn.Conn().RemoteAddr()
 }
@@ -73,7 +82,7 @@ func (s *Session) GetClientIP() net.Addr {
 // Mail is called when a sender is specified.
 func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 	//TODO new email, one session may have mulit email, need generate id for email
-	log.Printf("[%s] Mail from: %s", s.id, from)
+	s.ctx.Logger().Info("MAIL FROM command received", "from", from)
 	if action := s.chains.MailFromChain.execute(s.ctx); action == Reject {
 		return ErrRejected
 	}
@@ -82,7 +91,7 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 
 // Rcpt is called for each recipient.
 func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
-	log.Printf("[%s] Rcpt to: %s", s.id, to)
+	s.ctx.Logger().Info("RCPT TO command received", "to", to)
 	action := s.chains.RcptToChain.execute(s.ctx)
 
 	// Process the result based on the action
@@ -90,7 +99,7 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 		return ErrRejected
 	}
 	if action != Pass {
-		log.Printf("[%s] Middleware chain for RcptTo stopped with action: %v", s.id, action)
+		s.ctx.Logger().Debug("Middleware chain for RcptTo finished with specific action", "action", action)
 	}
 	return nil
 }
@@ -100,7 +109,7 @@ func (s *Session) Data(r io.Reader) error {
 	if _, err := io.ReadAll(r); err != nil {
 		return err
 	}
-	log.Printf("[%s] Data received", s.id)
+	s.ctx.Logger().Info("Data received")
 	if action := s.chains.DataChain.execute(s.ctx); action == Reject {
 		return ErrRejected
 	}
@@ -114,7 +123,7 @@ func (s *Session) Reset() {
 
 // Logout is called when a client closes the connection.
 func (s *Session) Logout() error {
-	log.Printf("[%s] Session closed", s.id)
+	s.ctx.Logger().Info("Session closed")
 	FreeContext(s.ctx)
 
 	return nil
