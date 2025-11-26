@@ -1,6 +1,9 @@
 package brisa
 
 import (
+	"bytes"
+	"fmt"
+	"log/slog"
 	"testing"
 )
 
@@ -150,6 +153,186 @@ func TestMiddlewareChain_Execute(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// --- MiddlewareFactory Tests ---
+
+// mockMiddlewareFactoryFunc creates a simple MiddlewareFactoryFunc for testing.
+func mockMiddlewareFactoryFunc(returnErr bool) MiddlewareFactoryFunc {
+	return func(config map[string]any) (Middleware, error) {
+		if returnErr {
+			return Middleware{}, fmt.Errorf("factory error")
+		}
+		return Middleware{
+			Handler:     func(ctx *Context) Action { return Pass },
+			IgnoreFlags: Pass, // A non-default value to check if it's overwritten
+		}, nil
+	}
+}
+
+func TestNewMiddlewareFactory(t *testing.T) {
+	t.Run("with nil logger", func(t *testing.T) {
+		factory := NewMiddlewareFactory(nil)
+		if factory == nil {
+			t.Fatal("NewMiddlewareFactory returned nil")
+		}
+		if factory.logger == nil {
+			t.Error("Factory logger should not be nil even if input logger is")
+		}
+	})
+
+	t.Run("with provided logger", func(t *testing.T) {
+		var buf bytes.Buffer
+		logger := slog.New(slog.NewTextHandler(&buf, nil))
+		factory := NewMiddlewareFactory(logger)
+		if factory.logger != logger {
+			t.Error("Factory did not use the provided logger")
+		}
+	})
+}
+
+func TestMiddlewareFactory_Register(t *testing.T) {
+	factory := NewMiddlewareFactory(nil)
+
+	t.Run("successful registration", func(t *testing.T) {
+		err := factory.Register("test-mw", mockMiddlewareFactoryFunc(false))
+		if err != nil {
+			t.Errorf("Expected no error on first registration, got %v", err)
+		}
+	})
+
+	t.Run("duplicate registration", func(t *testing.T) {
+		err := factory.Register("test-mw", mockMiddlewareFactoryFunc(false))
+		if err == nil {
+			t.Error("Expected an error on duplicate registration, got nil")
+		}
+	})
+}
+
+func TestMiddlewareFactory_Unregister(t *testing.T) {
+	factory := NewMiddlewareFactory(nil)
+	factory.Register("test-mw", mockMiddlewareFactoryFunc(false))
+
+	t.Run("successful unregistration", func(t *testing.T) {
+		err := factory.Unregister("test-mw")
+		if err != nil {
+			t.Errorf("Expected no error on unregistering an existing middleware, got %v", err)
+		}
+		if _, exists := factory.registry["test-mw"]; exists {
+			t.Error("Middleware should have been removed from the registry")
+		}
+	})
+
+	t.Run("unregister non-existent", func(t *testing.T) {
+		err := factory.Unregister("non-existent-mw")
+		if err == nil {
+			t.Error("Expected an error when unregistering a non-existent middleware, got nil")
+		}
+	})
+}
+
+func TestMiddlewareFactory_Create(t *testing.T) {
+	factory := NewMiddlewareFactory(nil)
+	factory.Register("success-mw", mockMiddlewareFactoryFunc(false))
+	factory.Register("fail-mw", mockMiddlewareFactoryFunc(true))
+
+	testCases := []struct {
+		name          string
+		mwName        string
+		config        map[string]any
+		expectErr     bool
+		expectedFlags Action
+	}{
+		{
+			name:      "create successful middleware",
+			mwName:    "success-mw",
+			config:    map[string]any{},
+			expectErr: false,
+		},
+		{
+			name:      "create non-existent middleware",
+			mwName:    "non-existent-mw",
+			config:    map[string]any{},
+			expectErr: true,
+		},
+		{
+			name:      "create middleware with factory error",
+			mwName:    "fail-mw",
+			config:    map[string]any{},
+			expectErr: true,
+		},
+		{
+			name:   "create with int ignore_flags",
+			mwName: "success-mw",
+			config: map[string]any{
+				"ignore_flags": int(IgnoreDeliver),
+			},
+			expectErr:     false,
+			expectedFlags: IgnoreDeliver,
+		},
+		{
+			name:   "create with float64 ignore_flags",
+			mwName: "success-mw",
+			config: map[string]any{
+				"ignore_flags": float64(IgnoreQuarantine),
+			},
+			expectErr:     false,
+			expectedFlags: IgnoreQuarantine,
+		},
+		{
+			name:   "create with invalid ignore_flags type",
+			mwName: "success-mw",
+			config: map[string]any{
+				"ignore_flags": "not-a-number",
+			},
+			expectErr:     false,
+			expectedFlags: Pass, // The default from mockMiddlewareFactoryFunc
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			mw, err := factory.Create(tc.mwName, tc.config)
+
+			if tc.expectErr {
+				if err == nil {
+					t.Errorf("Expected an error, but got nil")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("Expected no error, but got: %v", err)
+			}
+			if mw == nil {
+				t.Fatal("Expected middleware to be created, but it was nil")
+			}
+
+			if tc.expectedFlags != 0 && mw.IgnoreFlags != tc.expectedFlags {
+				t.Errorf("Expected IgnoreFlags to be %v, but got %v", tc.expectedFlags, mw.IgnoreFlags)
+			}
+		})
+	}
+}
+
+func TestMiddlewareFactory_List(t *testing.T) {
+	factory := NewMiddlewareFactory(nil)
+	factory.Register("mw1", mockMiddlewareFactoryFunc(false))
+	factory.Register("mw2", mockMiddlewareFactoryFunc(false))
+
+	list := factory.List()
+	if len(list) != 2 {
+		t.Fatalf("Expected list of 2 middlewares, got %d", len(list))
+	}
+
+	// Order is not guaranteed, so check for presence
+	found := make(map[string]bool)
+	for _, name := range list {
+		found[name] = true
+	}
+	if !found["mw1"] || !found["mw2"] {
+		t.Errorf("List did not contain all registered middlewares. Got: %v", list)
 	}
 }
 
