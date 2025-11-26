@@ -19,7 +19,7 @@ func main() {
 	// Create MiddlewareFactory and Register IPBlackList middleware
 	factory := brisa.NewMiddlewareFactory(logger)
 	if err := factory.Register("ip_blacklist", middleware.IPBlacklistFactory); err != nil {
-		logger.Error("register ip_balcklist failed, err: %s", err.Error())
+		logger.Error("register ip_balcklist failed", "error", err.Error())
 		return
 	}
 
@@ -33,7 +33,7 @@ func main() {
 	// Config middleware chains
 	chains := brisa.NewMiddlewareChains()
 	if m, err := factory.Create("ip_blacklist", ipBlacklistCfg); err != nil {
-		logger.Error("create ip_blacklist failed, err: %s", err.Error())
+		logger.Error("create ip_blacklist failed", "error", err.Error())
 		return
 	} else {
 		chains.RegisterConnMiddleware(*m)
