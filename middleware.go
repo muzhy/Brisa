@@ -48,7 +48,7 @@ type Middleware struct {
 
 // MiddlewareFactoryFunc is the signature for a factory function that creates a middleware.
 // It takes a generic map configuration and returns a Middleware instance or an error.
-type MiddlewareFactoryFunc func(config map[string]any) (Middleware, error)
+type MiddlewareFactoryFunc func(config map[string]any) (*Middleware, error)
 
 // MiddlewareFactory is a factory for creating and managing middleware.
 type MiddlewareFactory struct {
@@ -127,7 +127,7 @@ func (f *MiddlewareFactory) Create(name string, config map[string]any) (*Middlew
 		}
 	}
 
-	return &mw, nil
+	return mw, nil
 }
 
 // List returns a slice of names of all registered middleware factories.

@@ -2,6 +2,7 @@ package brisa
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -17,6 +18,14 @@ const (
 	ChainRcptTo   = "rcpt_to"
 	ChainData     = "data"
 )
+
+// ValidChains is a set of all valid middleware chain names.
+var ValidChains = map[string]struct{}{
+	ChainConn:     {},
+	ChainMailFrom: {},
+	ChainRcptTo:   {},
+	ChainData:     {},
+}
 
 var (
 	// ErrRejected is returned when a middleware rejects the connection.
@@ -117,6 +126,44 @@ func (s *Session) Logout() error {
 	FreeContext(s.ctx)
 
 	return nil
+}
+
+// NewChainsFromConfig constructs a MiddlewareChains instance from the configuration.
+// It uses a MiddlewareFactory to create instances of each middleware.
+func NewChainsFromConfig(cfg *MiddlewareConfig, factory *MiddlewareFactory) (*MiddlewareChains, error) {
+	chains := NewMiddlewareChains()
+
+	for chainName, instances := range cfg.Chains {
+		if _, ok := ValidChains[chainName]; !ok {
+			return nil, fmt.Errorf("invalid chain name '%s' in config", chainName)
+		}
+
+		for i, instanceConfig := range instances {
+			// The 'type' field is mandatory and specifies which middleware to create.
+			mwType, ok := instanceConfig["type"].(string)
+			if !ok || mwType == "" {
+				return nil, fmt.Errorf("middleware at index %d in chain '%s' is missing 'type' field", i, chainName)
+			}
+
+			// Add recover to prevent panic during middleware creation.
+			var mw *Middleware
+			var err error
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						err = fmt.Errorf("panic while creating middleware '%s': %v", mwType, r)
+					}
+				}()
+				mw, err = factory.Create(mwType, instanceConfig)
+			}()
+
+			if err != nil {
+				return nil, fmt.Errorf("failed to create middleware '%s' for chain '%s': %w", mwType, chainName, err)
+			}
+			chains.Register(chainName, *mw)
+		}
+	}
+	return chains, nil
 }
 
 // executeChain is a helper method to run a middleware chain for a given SMTP command.

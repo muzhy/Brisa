@@ -36,7 +36,8 @@ func main() {
 		logger.Error("create ip_blacklist failed", "error", err.Error())
 		return
 	} else {
-		chains.RegisterConnMiddleware(*m)
+		// chains.RegisterConnMiddleware(*m)
+		chains.Register(brisa.ChainConn, *m)
 	}
 
 	// Create Brisa and set chain

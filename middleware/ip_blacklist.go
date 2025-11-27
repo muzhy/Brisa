@@ -15,13 +15,13 @@ type IPBlacklistConfig struct {
 	IPs []string
 }
 
-func IPBlacklistFactory(config map[string]any) (brisa.Middleware, error) {
+func IPBlacklistFactory(config map[string]any) (*brisa.Middleware, error) {
 	var cfg IPBlacklistConfig
 	if err := mapstructure.Decode(config, &cfg); err != nil {
-		return brisa.Middleware{}, err
+		return nil, err
 	}
 	handler, err := NewIPBlacklistHandler(cfg)
-	return brisa.Middleware{Handler: handler}, err
+	return &brisa.Middleware{Handler: handler}, err
 }
 
 // NewIPBlacklist creates a new middleware for blocking IPs.

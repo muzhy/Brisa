@@ -188,11 +188,11 @@ func TestMiddlewareChain_Execute(t *testing.T) {
 
 // mockMiddlewareFactoryFunc creates a simple MiddlewareFactoryFunc for testing.
 func mockMiddlewareFactoryFunc(returnErr bool) MiddlewareFactoryFunc {
-	return func(config map[string]any) (Middleware, error) {
+	return func(config map[string]any) (*Middleware, error) {
 		if returnErr {
-			return Middleware{}, fmt.Errorf("factory error")
+			return nil, fmt.Errorf("factory error")
 		}
-		return Middleware{
+		return &Middleware{
 			Handler:     func(ctx *Context) Action { return Pass },
 			IgnoreFlags: Pass, // A non-default value to check if it's overwritten
 		}, nil
