@@ -16,6 +16,14 @@ func mockHandler(t *testing.T, name string, returnAction Action, called *bool) H
 	}
 }
 
+// panicHandler creates a handler that immediately panics.
+func panicHandler(t *testing.T, name string, called *bool) Handler {
+	return func(ctx *Context) Action {
+		*called = true
+		panic(fmt.Sprintf("panic from %s", name))
+	}
+}
+
 func TestMiddlewareChain_Execute(t *testing.T) {
 	testCases := []struct {
 		name                string
@@ -115,6 +123,19 @@ func TestMiddlewareChain_Execute(t *testing.T) {
 			expectedFinalAction: Quarantine, // Status doesn't change as middleware is skipped
 			expectedCalls:       []string{},
 		},
+		{
+			name: "Middleware panics, should recover and return Reject",
+			setupMiddlewares: func(t *testing.T, calls map[string]*bool) []Middleware {
+				return []Middleware{
+					{Handler: mockHandler(t, "m1", Pass, calls["m1"])},
+					{Handler: panicHandler(t, "m2", calls["m2"])},
+					{Handler: mockHandler(t, "m3", Pass, calls["m3"])},
+				}
+			},
+			initialCtxStatus:    Pass,
+			expectedFinalAction: Reject,
+			expectedCalls:       []string{"m1", "m2"}, // m3 should not be called
+		},
 	}
 
 	for _, tc := range testCases {
@@ -133,10 +154,17 @@ func TestMiddlewareChain_Execute(t *testing.T) {
 			ctx.Status = tc.initialCtxStatus
 			defer FreeContext(ctx)
 
-			finalAction := chain.execute(ctx)
+			finalAction, err := chain.Execute(ctx)
 
 			if finalAction != tc.expectedFinalAction {
 				t.Errorf("Expected final action %d, but got %d", tc.expectedFinalAction, finalAction)
+			}
+
+			// Check for panicking case
+			if tc.name == "Middleware panics, should recover and return Reject" {
+				if err == nil {
+					t.Error("Expected an error from panic recovery, but got nil")
+				}
 			}
 
 			// Check which handlers were actually called
@@ -336,81 +364,81 @@ func TestMiddlewareFactory_List(t *testing.T) {
 	}
 }
 
-func TestMiddlewareChains_Register(t *testing.T) {
-	// dummyHandler is an empty handler function for testing purposes.
+func TestMiddlewareChains(t *testing.T) {
 	dummyHandler := func(ctx *Context) Action { return Pass }
 
-	// testCases defines test cases for different registration scenarios.
-	testCases := []struct {
-		name                 string
-		middlewareToRegister Middleware
-		expectedIgnoreFlags  Action
-	}{
-		{
-			name:                 "when IgnoreFlags is zero, should apply DefaultIgnoreFlags",
-			middlewareToRegister: Middleware{Handler: dummyHandler}, // IgnoreFlags is 0 by default
-			expectedIgnoreFlags:  DefaultIgnoreFlags,
-		},
-		{
-			name:                 "when IgnoreFlags is explicitly set to a non-zero value, should keep it",
-			middlewareToRegister: Middleware{Handler: dummyHandler, IgnoreFlags: IgnoreDeliver},
-			expectedIgnoreFlags:  IgnoreDeliver,
-		},
-		{
-			name:                 "when IgnoreFlags is explicitly set to 0, should apply DefaultIgnoreFlags",
-			middlewareToRegister: Middleware{Handler: dummyHandler, IgnoreFlags: 0},
-			expectedIgnoreFlags:  DefaultIgnoreFlags,
-		},
-	}
+	t.Run("Register and Get", func(t *testing.T) {
+		chains := NewMiddlewareChains()
+		chainTypes := []string{
+			ChainConn,
+			ChainMailFrom,
+			ChainRcptTo,
+			ChainData,
+		}
 
-	// registerFuncs associates the target test methods with the chains they operate on.
-	registerFuncs := map[string]struct {
-		register func(*middlewareChains, Middleware)
-		getChain func(*middlewareChains) *MiddlewareChain
-	}{
-		"RegisterConnMiddleware": {
-			register: func(c *middlewareChains, m Middleware) { c.RegisterConnMiddleware(m) },
-			getChain: func(c *middlewareChains) *MiddlewareChain { return &c.ConnChain },
-		},
-		"RegisterMailFromMiddleware": {
-			register: func(c *middlewareChains, m Middleware) { c.RegisterMailFromMiddleware(m) },
-			getChain: func(c *middlewareChains) *MiddlewareChain { return &c.MailFromChain },
-		},
-		"RegisterRcptToMiddleware": {
-			register: func(c *middlewareChains, m Middleware) { c.RegisterRcptToMiddleware(m) },
-			getChain: func(c *middlewareChains) *MiddlewareChain { return &c.RcptToChain },
-		},
-		"RegisterDataMiddleware": {
-			register: func(c *middlewareChains, m Middleware) { c.RegisterDataMiddleware(m) },
-			getChain: func(c *middlewareChains) *MiddlewareChain { return &c.DataChain },
-		},
-	}
+		// Test registration on all chain types
+		for _, chainType := range chainTypes {
+			t.Run(string(chainType), func(t *testing.T) {
+				// Register a middleware
+				mw1 := Middleware{Handler: dummyHandler}
+				chains.Register(chainType, mw1)
 
-	for funcName, f := range registerFuncs {
-		t.Run(funcName, func(t *testing.T) {
-			for _, tc := range testCases {
-				t.Run(tc.name, func(t *testing.T) {
-					chains := NewMiddlewareChains()
+				// Verify it was registered and defaults were applied
+				chain, ok := chains.Get(chainType)
+				if !ok {
+					t.Fatalf("chain '%s' should exist after registration", chainType)
+				}
+				if len(chain) != 1 {
+					t.Fatalf("expected chain length 1, got %d", len(chain))
+				}
+				if chain[0].IgnoreFlags != DefaultIgnoreFlags {
+					t.Errorf("expected default IgnoreFlags %v, got %v", DefaultIgnoreFlags, chain[0].IgnoreFlags)
+				}
 
-					// Register the first middleware and verify
-					f.register(chains, tc.middlewareToRegister)
-					chain := f.getChain(chains)
+				// Register a second middleware with explicit flags
+				mw2 := Middleware{Handler: dummyHandler, IgnoreFlags: IgnoreDeliver}
+				chains.Register(chainType, mw2)
+				chain, _ = chains.Get(chainType)
+				if len(chain) != 2 {
+					t.Fatalf("expected chain length 2, got %d", len(chain))
+				}
+				if chain[1].IgnoreFlags != IgnoreDeliver {
+					t.Errorf("expected explicit IgnoreFlags %v, got %v", IgnoreDeliver, chain[1].IgnoreFlags)
+				}
+			})
+		}
 
-					if len(*chain) != 1 {
-						t.Fatalf("Expected chain length to be 1, but got %d", len(*chain))
-					}
-					if (*chain)[0].IgnoreFlags != tc.expectedIgnoreFlags {
-						t.Errorf("Expected IgnoreFlags to be %v, but got %v", tc.expectedIgnoreFlags, (*chain)[0].IgnoreFlags)
-					}
-
-					// Register a second middleware to verify order and count
-					secondMiddleware := Middleware{Handler: dummyHandler, IgnoreFlags: IgnoreDeliver}
-					f.register(chains, secondMiddleware)
-					if len(*chain) != 2 {
-						t.Fatalf("Expected chain length to be 2 after second registration, but got %d", len(*chain))
-					}
-				})
+		t.Run("Get non-existent chain", func(t *testing.T) {
+			_, ok := chains.Get("non-existent-chain")
+			if ok {
+				t.Error("expected 'ok' to be false for a non-existent chain, but it was true")
 			}
 		})
-	}
+	})
+
+	t.Run("Default IgnoreFlags application", func(t *testing.T) {
+		testCases := []struct {
+			name                 string
+			middlewareToRegister Middleware
+			expectedIgnoreFlags  Action
+		}{
+			{"when IgnoreFlags is zero, should apply DefaultIgnoreFlags", Middleware{Handler: dummyHandler}, DefaultIgnoreFlags},
+			{"when IgnoreFlags is explicitly set, should keep it", Middleware{Handler: dummyHandler, IgnoreFlags: IgnoreDeliver}, IgnoreDeliver},
+		}
+
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				chains := NewMiddlewareChains()
+				chains.Register(ChainConn, tc.middlewareToRegister)
+				chain, _ := chains.Get(ChainConn)
+
+				if len(chain) != 1 {
+					t.Fatalf("Expected chain length to be 1, but got %d", len(chain))
+				}
+				if chain[0].IgnoreFlags != tc.expectedIgnoreFlags {
+					t.Errorf("Expected IgnoreFlags to be %v, but got %v", tc.expectedIgnoreFlags, chain[0].IgnoreFlags)
+				}
+			})
+		}
+	})
 }

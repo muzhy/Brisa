@@ -11,6 +11,13 @@ import (
 	"github.com/google/uuid"
 )
 
+const (
+	ChainConn     = "conn"
+	ChainMailFrom = "mail_from"
+	ChainRcptTo   = "rcpt_to"
+	ChainData     = "data"
+)
+
 var (
 	// ErrRejected is returned when a middleware rejects the connection.
 	ErrRejected = errors.New("rejected by middleware")
@@ -18,7 +25,7 @@ var (
 
 // Brisa implements SMTP server methods.
 type Brisa struct {
-	chains atomic.Pointer[middlewareChains]
+	chains atomic.Pointer[MiddlewareChains]
 	logger *slog.Logger
 }
 
@@ -39,7 +46,7 @@ func New(logger *slog.Logger) *Brisa {
 
 // UpdateChains atomically replaces the current middleware chains with a new set.
 // This is the method you would call when your configuration changes.
-func (b *Brisa) UpdateChains(set *middlewareChains) {
+func (b *Brisa) UpdateChains(set *MiddlewareChains) {
 	b.chains.Store(set)
 	b.logger.Info("Middleware chains updated")
 }
@@ -59,9 +66,8 @@ func (b *Brisa) NewSession(c *smtp.Conn) (smtp.Session, error) {
 	// Link session back to context
 	s.ctx.Session = s
 
-	// Execute connection-level middleware immediately.
-	if action := s.chains.ConnChain.execute(ctx); action == Reject {
-		ctx.Logger().Warn("Connection rejected by middleware")
+	err := s.executeChain(ChainConn, "Greet")
+	if err != nil {
 		return nil, ErrRejected
 	}
 
@@ -72,7 +78,7 @@ type Session struct {
 	ctx    *Context
 	id     string
 	conn   *smtp.Conn
-	chains *middlewareChains
+	chains *MiddlewareChains
 }
 
 func (s *Session) GetClientIP() net.Addr {
@@ -83,25 +89,13 @@ func (s *Session) GetClientIP() net.Addr {
 func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 	//TODO new email, one session may have mulit email, need generate id for email
 	s.ctx.Logger().Info("MAIL FROM command received", "from", from)
-	if action := s.chains.MailFromChain.execute(s.ctx); action == Reject {
-		return ErrRejected
-	}
-	return nil
+	return s.executeChain(ChainMailFrom, "MAIL FROM")
 }
 
 // Rcpt is called for each recipient.
 func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 	s.ctx.Logger().Info("RCPT TO command received", "to", to)
-	action := s.chains.RcptToChain.execute(s.ctx)
-
-	// Process the result based on the action
-	if action == Reject {
-		return ErrRejected
-	}
-	if action != Pass {
-		s.ctx.Logger().Debug("Middleware chain for RcptTo finished with specific action", "action", action)
-	}
-	return nil
+	return s.executeChain(ChainRcptTo, "RCPT TO")
 }
 
 // Data is called when a message is received.
@@ -109,11 +103,7 @@ func (s *Session) Data(r io.Reader) error {
 	if _, err := io.ReadAll(r); err != nil {
 		return err
 	}
-	s.ctx.Logger().Info("Data received")
-	if action := s.chains.DataChain.execute(s.ctx); action == Reject {
-		return ErrRejected
-	}
-	return nil
+	return s.executeChain(ChainData, "DATA")
 }
 
 // Reset is called when a transaction is aborted.
@@ -125,6 +115,26 @@ func (s *Session) Reset() {
 func (s *Session) Logout() error {
 	s.ctx.Logger().Info("Session closed")
 	FreeContext(s.ctx)
+
+	return nil
+}
+
+// executeChain is a helper method to run a middleware chain for a given SMTP command.
+// It fetches the appropriate chain, executes it, and handles panics or rejections.
+func (s *Session) executeChain(chainName string, commandName string) error {
+	chain, ok := s.chains.Get(chainName)
+	if !ok {
+		// No middleware chain is defined for this command, so we allow it.
+		return nil
+	}
+
+	if action, err := chain.Execute(s.ctx); err != nil || action == Reject {
+		if err != nil {
+			s.ctx.Logger().Error(commandName+" middleware panicked, rejecting command", "error", err)
+		}
+		s.ctx.Status = Reject // Ensure context reflects the final decision.
+		return ErrRejected
+	}
 
 	return nil
 }

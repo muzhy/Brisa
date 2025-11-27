@@ -7,50 +7,53 @@ import (
 	"sync"
 )
 
-// Action 表示中间件执行后要采取的操作，同时也用作状态标志。
-// 它的值被设计为位标志，以便与 IgnoreFlags 进行位运算。
-type Action int // 使用 int 以便清晰地与 IgnoreFlags (也是 int) 进行位运算
+// Action represents the action to be taken after a middleware executes. It also
+// serves as a status flag. Its values are designed as bit flags to allow for
+// bitwise operations with IgnoreFlags.
+type Action int // Using int for clear bitwise operations with IgnoreFlags (also an int).
 
 const (
-	// Pass 继续执行下一个中间件。作为默认/初始状态。
+	// Pass continues to the next middleware. It serves as the default/initial state.
 	Pass Action = 1 << iota // 1
-	// Reject 拒绝邮件并停止处理。
+	// Reject rejects the email and stops processing.
 	Reject // 2
-	// Deliver 标记邮件为待投递。
+	// Deliver marks the email for delivery.
 	Deliver // 4
-	// Quarantine 标记邮件为隔离。
+	// Quarantine marks the email for quarantine.
 	Quarantine // 8
 )
 
-// IgnoreFlags 定义了中间件可以忽略的状态。
+// IgnoreFlags define the statuses that a middleware can ignore.
 const (
-	// IgnoreDeliver 当上下文状态为 Deliver 时，跳过此中间件。
+	// IgnoreDeliver skips the middleware if the context status is Deliver.
 	IgnoreDeliver Action = Deliver
-	// IgnoreQuarantine 当上下文状态为 Quarantine 时，跳过此中间件。
+	// IgnoreQuarantine skips the middleware if the context status is Quarantine.
 	IgnoreQuarantine Action = Quarantine
-	// DefaultIgnoreFlags 是中间件的默认忽略标志，默认忽略已投递或已隔离的状态。
+	// DefaultIgnoreFlags are the default flags for a middleware, causing it to
+	// skip execution if the email has already been marked for delivery or quarantine.
 	DefaultIgnoreFlags = IgnoreDeliver | IgnoreQuarantine
 )
 
-// Handler 是处理会话上下文的函数，是中间件的核心逻辑。
+// Handler is the core logic of a middleware, processing the session context.
 type Handler func(ctx *Context) Action
 
-// Middleware 是一个包含处理逻辑和元数据的结构体。
+// Middleware is a struct containing the handler logic and its metadata.
 type Middleware struct {
-	// Handler 是此中间件要执行的函数。
+	// Handler is the function to be executed by this middleware.
 	Handler Handler
-	// IgnoreFlags 是一个位掩码，指示该中间件应跳过哪些上下文状态。
+	// IgnoreFlags is a bitmask indicating which context statuses should cause
+	// this middleware to be skipped.
 	IgnoreFlags Action
 }
 
-// MiddlewareFactoryFunc 是一个创建中间件的工厂函数签名。
-// 它接收一个通用的 map 配置，并返回一个 brisa.Middleware 实例或一个错误。
+// MiddlewareFactoryFunc is the signature for a factory function that creates a middleware.
+// It takes a generic map configuration and returns a Middleware instance or an error.
 type MiddlewareFactoryFunc func(config map[string]any) (Middleware, error)
 
-// Factory 是一个用于创建和管理中间件的工厂。
+// MiddlewareFactory is a factory for creating and managing middleware.
 type MiddlewareFactory struct {
 	registry map[string]MiddlewareFactoryFunc
-	// 计划后续支持在运行时动态注册中间件，增加锁保护
+	// mu protects the registry, allowing for dynamic registration of middleware at runtime.
 	mu     sync.RWMutex
 	logger *slog.Logger
 }
@@ -71,7 +74,7 @@ func NewMiddlewareFactory(logger *slog.Logger) *MiddlewareFactory {
 func (f *MiddlewareFactory) Register(name string, factoryFunc MiddlewareFactoryFunc) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	// 不允许重名注册
+	// Disallow re-registering a name.
 	if _, exists := f.registry[name]; exists {
 		return fmt.Errorf("middleware factory with name '%s' already exists", name)
 	}
@@ -80,11 +83,11 @@ func (f *MiddlewareFactory) Register(name string, factoryFunc MiddlewareFactoryF
 	return nil
 }
 
-// 注销已注册到MiddlewareFactory中的插件
+// Unregister removes a registered middleware factory by name.
 func (f *MiddlewareFactory) Unregister(name string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	// 检查插件是否存在，如果存在再注销，不存再返回错误信息
+	// Check if the factory exists before unregistering.
 	if _, exists := f.registry[name]; !exists {
 		return fmt.Errorf("middleware factory with name '%s' does not exist", name)
 	}
@@ -93,9 +96,9 @@ func (f *MiddlewareFactory) Unregister(name string) error {
 	return nil
 }
 
-// Get returns a registered MiddlewareFactoryFunc by name.
+// Create creates a middleware instance by name using its registered factory function.
 // It is safe for concurrent use.
-// 返回的`Middleware`使用指针还是使用对象更合适？
+// It returns a pointer to allow for post-creation modifications (e.g., setting IgnoreFlags) on the instance.
 func (f *MiddlewareFactory) Create(name string, config map[string]any) (*Middleware, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
@@ -104,32 +107,31 @@ func (f *MiddlewareFactory) Create(name string, config map[string]any) (*Middlew
 		return nil, fmt.Errorf("middleware factory with name '%s' does not exist", name)
 	}
 
-	// 调用特定中间件的工厂函数
+	// Call the specific middleware's factory function.
 	mw, err := factoryFunc(config)
 	if err != nil {
 		return nil, fmt.Errorf("error creating middleware '%s': %w", name, err)
 	}
 
-	// --- 统一处理通用元数据 ---
-	// 检查配置中是否有自定义的 ignore_flags
+	// --- Handle common metadata ---
+	// Check for custom ignore_flags in the configuration.
 	if flagsVal, ok := config["ignore_flags"]; ok {
-		// 尝试将值转换为整数类型
+		// Try to convert the value to an integer type.
 		switch flags := flagsVal.(type) {
 		case int:
 			mw.IgnoreFlags = Action(flags)
-		case float64: // YAML/JSON 解析数字时可能为 float64
+		case float64: // YAML/JSON parsing might result in a float64 for numbers.
 			mw.IgnoreFlags = Action(int(flags))
 		default:
 			f.logger.Warn("Invalid type for 'ignore_flags', expected an integer, using default", "middleware", name, "type", fmt.Sprintf("%T", flagsVal))
 		}
 	}
-	// --------------------------
 
 	return &mw, nil
 }
 
-// 列出当前已注册的中间件
-// TODO 后续考虑更好的表现形式，单纯依赖注册时使用的名字可能不够
+// List returns a slice of names of all registered middleware factories.
+// It is safe for concurrent use.
 func (f *MiddlewareFactory) List() []string {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
@@ -140,75 +142,70 @@ func (f *MiddlewareFactory) List() []string {
 	return keys
 }
 
-// MiddlewareChain 是中间件的切片。
+// MiddlewareChain is a slice of Middleware.
 type MiddlewareChain []Middleware
 
-// execute 遍历并执行链中的所有中间件。
-// 它会传递给定的上下文给每个中间件。
-// 如果一个中间件的 Handler 被执行，它的返回 Action 会更新 Context 的状态。
-// 如果 Action 是 Reject，则立即停止并返回 Reject。
-func (mc MiddlewareChain) execute(ctx *Context) Action {
+// Execute iterates through and executes all middleware in the chain, passing the
+// context to each. It is panic-safe; if a middleware panics, Execute will
+// recover, return a Reject action, and an error detailing the panic.
+//
+// Execution logic:
+// - If a middleware's IgnoreFlags match the context's status, it's skipped.
+// - The action returned by a handler updates the context's status for subsequent middleware.
+// - If a handler returns Reject, execution stops immediately.
+func (mc MiddlewareChain) Execute(ctx *Context) (action Action, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			// A middleware panicked. Recover, set a terminal action, and return an error.
+			err = fmt.Errorf("panic recovered during middleware execution: %v", r)
+			action = Reject // Reject the session as a safe default.
+		}
+	}()
+
 	for _, m := range mc {
-		// 如果上下文的当前状态位与中间件的忽略标志位有重叠，则跳过此中间件。
+		// If the context's current status bit overlaps with the middleware's ignore flags, skip this middleware.
 		if (m.IgnoreFlags & ctx.Status) != 0 {
 			continue
 		}
 
-		action := m.Handler(ctx)
-
-		// 如果 action 是 Reject，则立即停止并返回。
-		// 其他 action (Pass, Deliver, Quarantine) 则更新上下文状态。
-		if action == Reject { // Reject 是一个终止状态
-			return action
+		ctx.Status = m.Handler(ctx)
+		if ctx.Status == Reject { // Reject is a terminal state.
+			return ctx.Status, nil
 		}
-
-		// 将上下文状态更新为当前中间件的决定。
-		// 注意：这里允许后续的中间件覆盖之前的状态（例如，从Deliver改为Quarantine）。
-		// 这种灵活性是特意设计的，以支持需要“改判”的复杂场景。
-		ctx.Status = action
 	}
-	return ctx.Status
+	return ctx.Status, nil
 }
 
-// middlewareChains holds all middleware chains for the Brisa server.
+// MiddlewareChains holds all named middleware chains for the Brisa server.
 // It's used to build a complete set of middleware chains that can be atomically
-// applied to a Brisa instance.
-type middlewareChains struct {
-	ConnChain     MiddlewareChain
-	MailFromChain MiddlewareChain
-	RcptToChain   MiddlewareChain
-	DataChain     MiddlewareChain
+// applied to a Brisa instance. It is not safe for concurrent use; concurrency
+// should be managed by the consumer (e.g., Brisa) through atomic replacement
+// of the entire instance.
+type MiddlewareChains struct {
+	chains map[string]MiddlewareChain
 }
 
-// NewMiddlewareChains creates a new, empty middlewareChains.
-func NewMiddlewareChains() *middlewareChains {
-	return &middlewareChains{}
-}
-
-// register is a helper method to add middleware to a specified chain and handle default IgnoreFlags.
-func (c *middlewareChains) register(chain *MiddlewareChain, m Middleware) {
-	if m.IgnoreFlags == 0 {
-		m.IgnoreFlags = DefaultIgnoreFlags
+// NewMiddlewareChains creates a new, empty MiddlewareChains.
+func NewMiddlewareChains() *MiddlewareChains {
+	return &MiddlewareChains{
+		chains: make(map[string]MiddlewareChain),
 	}
-	*chain = append(*chain, m)
 }
 
-// RegisterConnMiddleware adds middleware to the connection chain.
-func (c *middlewareChains) RegisterConnMiddleware(m Middleware) {
-	c.register(&c.ConnChain, m)
+// Register adds a middleware to a specified chain.
+// If the chain does not exist, it will be created.
+func (c *MiddlewareChains) Register(chainName string, m Middleware) {
+	if m.IgnoreFlags == 0 {
+		m.IgnoreFlags = DefaultIgnoreFlags // Apply default ignore flags if none are set.
+	}
+	c.chains[chainName] = append(c.chains[chainName], m)
 }
 
-// RegisterMailFromMiddleware adds middleware to the MAIL FROM chain.
-func (c *middlewareChains) RegisterMailFromMiddleware(m Middleware) {
-	c.register(&c.MailFromChain, m)
-}
-
-// RegisterRcptToMiddleware adds middleware to the RCPT TO chain.
-func (c *middlewareChains) RegisterRcptToMiddleware(m Middleware) {
-	c.register(&c.RcptToChain, m)
-}
-
-// RegisterDataMiddleware adds middleware to the DATA chain.
-func (c *middlewareChains) RegisterDataMiddleware(m Middleware) {
-	c.register(&c.DataChain, m)
+// Get retrieves a middleware chain by its name.
+// It returns the chain and a boolean indicating if the chain was found.
+// Since MiddlewareChains instances are treated as immutable after creation,
+// this method directly returns the internal slice without creating a copy.
+func (c *MiddlewareChains) Get(chainName string) (MiddlewareChain, bool) {
+	chain, ok := c.chains[chainName]
+	return chain, ok
 }
