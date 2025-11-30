@@ -2,7 +2,6 @@ package brisa
 
 import (
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -12,33 +11,76 @@ import (
 	"github.com/google/uuid"
 )
 
-const (
-	ChainConn     = "conn"
-	ChainMailFrom = "mail_from"
-	ChainRcptTo   = "rcpt_to"
-	ChainData     = "data"
-)
+// ChainType defines the type for middleware chain names, providing type safety.
+type ChainType string
 
-// ValidChains is a set of all valid middleware chain names.
-var ValidChains = map[string]struct{}{
-	ChainConn:     {},
-	ChainMailFrom: {},
-	ChainRcptTo:   {},
-	ChainData:     {},
-}
+const (
+	ChainConn     ChainType = "conn"
+	ChainMailFrom ChainType = "mail_from"
+	ChainRcptTo   ChainType = "rcpt_to"
+	ChainData     ChainType = "data"
+)
 
 var (
 	// ErrRejected is returned when a middleware rejects the connection.
 	ErrRejected = errors.New("rejected by middleware")
 )
 
+// Router holds all named middleware chains for the Brisa server.
+// It's used to build a complete set of middleware chains that can be atomically
+// applied to a Brisa instance. It is not safe for concurrent use; concurrency
+// should be managed by the consumer (e.g., Brisa) through atomic replacement
+// of the entire instance.
+type Router map[ChainType]MiddlewareChain
+
+// Use adds a middleware to the specified chain.
+func (r *Router) Use(chainName ChainType, m *Middleware) *Router {
+	(*r)[chainName] = append((*r)[chainName], *m)
+	return r
+}
+
+// OnConn adds a middleware to the Conn chain.
+func (r *Router) OnConn(m *Middleware) *Router {
+	return r.Use(ChainConn, m)
+}
+
+// OnMailFrom adds a middleware to the MailFrom chain.
+func (r *Router) OnMailFrom(m *Middleware) *Router {
+	return r.Use(ChainMailFrom, m)
+}
+
+// OnRcptTo adds a middleware to the RcptTo chain.
+func (r *Router) OnRcptTo(m *Middleware) *Router {
+	return r.Use(ChainRcptTo, m)
+}
+
+// OnData adds a middleware to the Data chain.
+func (r *Router) OnData(m *Middleware) *Router {
+	return r.Use(ChainData, m)
+}
+
+// Clone creates a deep copy of the Router.
+// It returns a new Router instance with a new underlying map, and each
+// middleware chain is also a new slice with its own backing array. This ensures
+// that modifications to the original Router or its chains do not affect the clone.
+func (r *Router) Clone() *Router {
+	newRouter := make(Router, len(*r))
+	for chainType, chain := range *r {
+		// Create a new slice with the same length and capacity.
+		chainCopy := make(MiddlewareChain, len(chain), cap(chain))
+		copy(chainCopy, chain) // Copy elements to the new slice's backing array.
+		newRouter[chainType] = chainCopy
+	}
+	return &newRouter
+}
+
 // Brisa implements SMTP server methods.
 type Brisa struct {
-	chains atomic.Pointer[MiddlewareChains]
+	router atomic.Pointer[Router]
 	logger *slog.Logger
 }
 
-// New creates a new Brisa instance with initial middleware chains.
+// New creates a new Brisa instance with initial router
 func New(logger *slog.Logger) *Brisa {
 	if logger == nil {
 		logger = slog.Default()
@@ -48,15 +90,19 @@ func New(logger *slog.Logger) *Brisa {
 		logger: logger,
 	}
 	// Initialize with empty chains.
-	b.chains.Store(NewMiddlewareChains())
+	b.router.Store(&Router{})
 
 	return b
 }
 
 // UpdateChains atomically replaces the current middleware chains with a new set.
 // This is the method you would call when your configuration changes.
-func (b *Brisa) UpdateChains(set *MiddlewareChains) {
-	b.chains.Store(set)
+// To ensure thread safety, this method clones the provided router to create a
+// completely independent deep copy. This prevents race conditions where the
+// caller might modify the router or its middleware chains after application.
+func (b *Brisa) UpdateRouter(router *Router) {
+	// Atomically store a deep copy of the router.
+	b.router.Store(router.Clone())
 	b.logger.Info("Middleware chains updated")
 }
 
@@ -70,12 +116,12 @@ func (b *Brisa) NewSession(c *smtp.Conn) (smtp.Session, error) {
 		ctx:    ctx,
 		id:     id,
 		conn:   c,
-		chains: b.chains.Load(),
+		router: b.router.Load(),
 	}
 	// Link session back to context
 	s.ctx.Session = s
 
-	err := s.executeChain(ChainConn, "Greet")
+	err := s.execute(ChainConn)
 	if err != nil {
 		return nil, ErrRejected
 	}
@@ -83,11 +129,12 @@ func (b *Brisa) NewSession(c *smtp.Conn) (smtp.Session, error) {
 	return s, nil
 }
 
+// ------- Session ---------
 type Session struct {
 	ctx    *Context
 	id     string
 	conn   *smtp.Conn
-	chains *MiddlewareChains
+	router *Router
 }
 
 func (s *Session) GetClientIP() net.Addr {
@@ -98,13 +145,13 @@ func (s *Session) GetClientIP() net.Addr {
 func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 	//TODO new email, one session may have mulit email, need generate id for email
 	s.ctx.Logger().Info("MAIL FROM command received", "from", from)
-	return s.executeChain(ChainMailFrom, "MAIL FROM")
+	return s.execute(ChainMailFrom)
 }
 
 // Rcpt is called for each recipient.
 func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 	s.ctx.Logger().Info("RCPT TO command received", "to", to)
-	return s.executeChain(ChainRcptTo, "RCPT TO")
+	return s.execute(ChainRcptTo)
 }
 
 // Data is called when a message is received.
@@ -112,7 +159,7 @@ func (s *Session) Data(r io.Reader) error {
 	if _, err := io.ReadAll(r); err != nil {
 		return err
 	}
-	return s.executeChain(ChainData, "DATA")
+	return s.execute(ChainData)
 }
 
 // Reset is called when a transaction is aborted.
@@ -128,48 +175,10 @@ func (s *Session) Logout() error {
 	return nil
 }
 
-// NewChainsFromConfig constructs a MiddlewareChains instance from the configuration.
-// It uses a MiddlewareFactory to create instances of each middleware.
-func NewChainsFromConfig(cfg *MiddlewareConfig, factory *MiddlewareFactory) (*MiddlewareChains, error) {
-	chains := NewMiddlewareChains()
-
-	for chainName, instances := range cfg.Chains {
-		if _, ok := ValidChains[chainName]; !ok {
-			return nil, fmt.Errorf("invalid chain name '%s' in config", chainName)
-		}
-
-		for i, instanceConfig := range instances {
-			// The 'type' field is mandatory and specifies which middleware to create.
-			mwType, ok := instanceConfig["type"].(string)
-			if !ok || mwType == "" {
-				return nil, fmt.Errorf("middleware at index %d in chain '%s' is missing 'type' field", i, chainName)
-			}
-
-			// Add recover to prevent panic during middleware creation.
-			var mw *Middleware
-			var err error
-			func() {
-				defer func() {
-					if r := recover(); r != nil {
-						err = fmt.Errorf("panic while creating middleware '%s': %v", mwType, r)
-					}
-				}()
-				mw, err = factory.Create(mwType, instanceConfig)
-			}()
-
-			if err != nil {
-				return nil, fmt.Errorf("failed to create middleware '%s' for chain '%s': %w", mwType, chainName, err)
-			}
-			chains.Register(chainName, *mw)
-		}
-	}
-	return chains, nil
-}
-
-// executeChain is a helper method to run a middleware chain for a given SMTP command.
+// execute is a helper method to run a middleware chain for a given SMTP command.
 // It fetches the appropriate chain, executes it, and handles panics or rejections.
-func (s *Session) executeChain(chainName string, commandName string) error {
-	chain, ok := s.chains.Get(chainName)
+func (s *Session) execute(chainType ChainType) error {
+	chain, ok := (*s.router)[chainType]
 	if !ok {
 		// No middleware chain is defined for this command, so we allow it.
 		return nil
@@ -177,7 +186,7 @@ func (s *Session) executeChain(chainName string, commandName string) error {
 
 	if action, err := chain.Execute(s.ctx); err != nil || action == Reject {
 		if err != nil {
-			s.ctx.Logger().Error(commandName+" middleware panicked, rejecting command", "error", err)
+			s.ctx.Logger().Error("middleware panicked, rejecting command", "error", err, "ChainType", string(chainType))
 		}
 		s.ctx.Status = Reject // Ensure context reflects the final decision.
 		return ErrRejected

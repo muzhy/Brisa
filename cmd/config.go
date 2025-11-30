@@ -1,33 +1,12 @@
-package brisa
+package main
 
 import (
 	"fmt"
 	"io"
 	"os"
-	"time"
 
 	"gopkg.in/yaml.v3"
 )
-
-// Config represents the top-level configuration structure for the Brisa server.
-type Config struct {
-	Server     ServerConfig     `yaml:"server"`
-	Log        LogConfig        `yaml:"log"`
-	Middleware MiddlewareConfig `yaml:"middleware"`
-}
-
-// ServerConfig holds the server-specific settings like listen address and timeouts.
-type ServerConfig struct {
-	Listen       string        `yaml:"listen"`
-	ReadTimeout  time.Duration `yaml:"read_timeout"`
-	WriteTimeout time.Duration `yaml:"write_timeout"`
-}
-
-// LogConfig holds logging-related settings.
-type LogConfig struct {
-	Level string `yaml:"level"`
-	Path  string `yaml:"path"`
-}
 
 // MiddlewareConfig holds the configuration for all middleware chains.
 type MiddlewareConfig struct {

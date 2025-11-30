@@ -4,8 +4,6 @@ import (
 	"brisa"
 	"fmt"
 	"net"
-
-	"github.com/go-viper/mapstructure/v2"
 )
 
 // IPBlacklistConfig holds the configuration for the IPBlacklist middleware.
@@ -13,15 +11,6 @@ type IPBlacklistConfig struct {
 	// IPs contains a list of single IP addresses or CIDR blocks to block.
 	// e.g., ["1.2.3.4", "192.168.0.0/24"]
 	IPs []string
-}
-
-func IPBlacklistFactory(config map[string]any) (*brisa.Middleware, error) {
-	var cfg IPBlacklistConfig
-	if err := mapstructure.Decode(config, &cfg); err != nil {
-		return nil, err
-	}
-	handler, err := NewIPBlacklistHandler(cfg)
-	return &brisa.Middleware{Handler: handler}, err
 }
 
 // NewIPBlacklist creates a new middleware for blocking IPs.
