@@ -2,61 +2,48 @@ package main
 
 import (
 	"brisa"
-	"brisa/middleware"
-	"log"
 	"log/slog"
 	"os"
 	"time"
 
 	"github.com/emersion/go-smtp"
+
+	"brisa/middleware"
 )
 
 func main() {
+	// init logger
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	// Create logger for application
-	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-
-	// Create MiddlewareFactory and Register IPBlackList middleware
-	factory := brisa.NewMiddlewareFactory(logger)
-	if err := factory.Register("ip_blacklist", middleware.IPBlacklistFactory); err != nil {
-		logger.Error("register ip_balcklist failed", "error", err.Error())
+	// set routter
+	router := brisa.Router{}
+	// create middleware
+	ipBlacklistHandler, err := middleware.NewIPBlacklistHandler([]string{"192.168.1.100"})
+	if err != nil {
+		logger.Error("create IPBlacklist Handler failed")
 		return
 	}
+	router.OnConn(&brisa.Middleware{
+		Handler:     ipBlacklistHandler,
+		IgnoreFlags: brisa.DefaultIgnoreFlags,
+	})
 
-	// Define IPBlacklist config
-	ipBlacklistCfg := map[string]any{
-		"IPs": []string{
-			"192.168.1.100", // Block a specific IP
-		},
-	}
-
-	// Config middleware chains
-	chains := brisa.NewMiddlewareChains()
-	if m, err := factory.Create("ip_blacklist", ipBlacklistCfg); err != nil {
-		logger.Error("create ip_blacklist failed", "error", err.Error())
-		return
-	} else {
-		// chains.RegisterConnMiddleware(*m)
-		chains.Register(brisa.ChainConn, *m)
-	}
-
-	// Create Brisa and set chain
 	b := brisa.New(logger)
-	b.UpdateChains(chains)
+	b.UpdateRouter(&router)
 
-	// Start server
+	// start server
 	s := smtp.NewServer(b)
-
 	s.Addr = ":1025"
-	s.Domain = "localhost"
+	s.Domain = "localhost" // 可在配置中添加
 	s.ReadTimeout = 10 * time.Second
 	s.WriteTimeout = 10 * time.Second
-	s.MaxMessageBytes = 1024 * 1024
-	s.MaxRecipients = 50
-	s.AllowInsecureAuth = true
+	s.MaxMessageBytes = 1024 * 1024 // 可在配置中添加
+	s.MaxRecipients = 50            // 可在配置中添加
+	s.AllowInsecureAuth = true      // 可在配置中添加
 
-	log.Println("Starting SMTP server at", s.Addr)
+	logger.Info("starting SMTP server...", "address", s.Addr)
 	if err := s.ListenAndServe(); err != nil {
-		log.Fatal(err)
+		logger.Error("server failed to start", "error", err)
+		os.Exit(1)
 	}
 }

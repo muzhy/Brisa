@@ -110,7 +110,7 @@ func (b *Brisa) UpdateRouter(router *Router) {
 func (b *Brisa) NewSession(c *smtp.Conn) (smtp.Session, error) {
 	id := uuid.NewString()
 	ctx := NewContext()
-	ctx.logger = b.logger.With("session_id", id)
+	ctx.Logger = b.logger.With("session_id", id)
 
 	s := &Session{
 		ctx:    ctx,
@@ -144,22 +144,33 @@ func (s *Session) GetClientIP() net.Addr {
 // Mail is called when a sender is specified.
 func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 	//TODO new email, one session may have mulit email, need generate id for email
-	s.ctx.Logger().Info("MAIL FROM command received", "from", from)
+	s.ctx.Logger.Info("MAIL FROM command received", "from", from)
 	return s.execute(ChainMailFrom)
 }
 
 // Rcpt is called for each recipient.
 func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
-	s.ctx.Logger().Info("RCPT TO command received", "to", to)
+	s.ctx.Logger.Info("RCPT TO command received", "to", to)
 	return s.execute(ChainRcptTo)
 }
 
 // Data is called when a message is received.
 func (s *Session) Data(r io.Reader) error {
-	if _, err := io.ReadAll(r); err != nil {
+	s.ctx.Reader = r
+
+	err := s.execute(ChainData)
+
+	if err != nil {
 		return err
+	} else {
+		if s.ctx.Status == Pass {
+			s.ctx.Status = Deliver
+		}
 	}
-	return s.execute(ChainData)
+
+	// TODO handle action
+
+	return nil
 }
 
 // Reset is called when a transaction is aborted.
@@ -169,7 +180,7 @@ func (s *Session) Reset() {
 
 // Logout is called when a client closes the connection.
 func (s *Session) Logout() error {
-	s.ctx.Logger().Info("Session closed")
+	s.ctx.Logger.Info("Session closed")
 	FreeContext(s.ctx)
 
 	return nil
@@ -186,7 +197,7 @@ func (s *Session) execute(chainType ChainType) error {
 
 	if action, err := chain.Execute(s.ctx); err != nil || action == Reject {
 		if err != nil {
-			s.ctx.Logger().Error("middleware panicked, rejecting command", "error", err, "ChainType", string(chainType))
+			s.ctx.Logger.Error("middleware panicked, rejecting command", "error", err, "ChainType", string(chainType))
 		}
 		s.ctx.Status = Reject // Ensure context reflects the final decision.
 		return ErrRejected

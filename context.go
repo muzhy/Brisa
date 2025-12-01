@@ -1,6 +1,7 @@
 package brisa
 
 import (
+	"io"
 	"log/slog"
 	"sync"
 )
@@ -8,8 +9,8 @@ import (
 // Context represents the context of a session.
 type Context struct {
 	Session *Session
-	logger  *slog.Logger
-
+	Logger  *slog.Logger
+	Reader  io.Reader
 	// Status stores the cumulative status during the execution of the middleware chain.
 	Status Action
 	keys   map[string]any
@@ -39,18 +40,14 @@ func (c *Context) Get(key string) (value any, exists bool) {
 	return value, exists
 }
 
-// Logger returns the logger associated with the context.
-func (c *Context) Logger() *slog.Logger {
-	return c.logger
-}
-
 // Reset resets the context for reuse.
 func (c *Context) Reset() {
 	c.Session = nil
-	c.logger = nil
+	c.Logger = nil
 	c.Status = Pass // Reset to the initial state
 	c.mu.Lock()
 	c.keys = nil
+	c.Reader = nil
 	c.mu.Unlock()
 }
 
