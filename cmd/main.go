@@ -1,14 +1,14 @@
 package main
 
 import (
-	"brisa"
+	"github.com/muzhy/brisa"
 	"log/slog"
 	"os"
 	"time"
 
 	"github.com/emersion/go-smtp"
 
-	"brisa/middleware"
+	"github.com/muzhy/brisa/middleware"
 )
 
 func main() {

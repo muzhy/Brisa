@@ -1,7 +1,7 @@
 package middleware
 
 import (
-	"brisa"
+	"github.com/muzhy/brisa"
 	"fmt"
 	"net"
 )
