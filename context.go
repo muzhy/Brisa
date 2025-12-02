@@ -4,17 +4,46 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+
+	"github.com/emersion/go-smtp"
 )
 
 // Context represents the context of a session.
 type Context struct {
 	Session *Session
 	Logger  *slog.Logger
-	Reader  io.Reader
-	// Status stores the cumulative status during the execution of the middleware chain.
-	Status Action
+
+	From        string
+	FromOptions *smtp.MailOptions
+	To          string
+	ToOptions   *smtp.RcptOptions
+
+	Reader io.Reader
+	// Action stores the cumulative status during the execution of the middleware chain.
+	Action Action
 	keys   map[string]any
 	mu     sync.RWMutex
+}
+
+// Reset resets the context for reuse.
+func (c *Context) Reset() {
+	c.Session = nil
+	c.Logger = nil
+	c.Action = Pass // Reset to the initial state
+	c.ResetMailFields()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.keys = nil
+}
+
+// ResetMailFields resets fields related to a single mail transaction.
+func (c *Context) ResetMailFields() {
+	c.Reader = nil
+	c.From = ""
+	c.To = ""
+	c.FromOptions = nil
+	c.ToOptions = nil
 }
 
 // Set stores a new key-value pair in the context.
@@ -40,17 +69,6 @@ func (c *Context) Get(key string) (value any, exists bool) {
 	return value, exists
 }
 
-// Reset resets the context for reuse.
-func (c *Context) Reset() {
-	c.Session = nil
-	c.Logger = nil
-	c.Status = Pass // Reset to the initial state
-	c.mu.Lock()
-	c.keys = nil
-	c.Reader = nil
-	c.mu.Unlock()
-}
-
 var contextPool = sync.Pool{
 	New: func() any {
 		return new(Context)
@@ -60,7 +78,7 @@ var contextPool = sync.Pool{
 // newContext returns a new or recycled Context instance.
 func NewContext() *Context {
 	c := contextPool.Get().(*Context)
-	c.Status = Pass // Ensure the instance from the pool has a clean state
+	c.Action = Pass // Ensure the instance from the pool has a clean state
 	return c
 }
 

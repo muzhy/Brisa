@@ -18,6 +18,8 @@ const (
 	Deliver // 4
 	// Quarantine marks the email for quarantine.
 	Quarantine // 8
+	// Discard marks the email for discard. Accept email but not save
+	Discard // 16
 )
 
 // IgnoreFlags define the statuses that a middleware can ignore.
@@ -26,9 +28,11 @@ const (
 	IgnoreDeliver Action = Deliver
 	// IgnoreQuarantine skips the middleware if the context status is Quarantine.
 	IgnoreQuarantine Action = Quarantine
+	// IgnoreDiscard skips the middleware if the context status is Discard.
+	IgnoreDiscard Action = Discard
 	// DefaultIgnoreFlags are the default flags for a middleware, causing it to
 	// skip execution if the email has already been marked for delivery or quarantine.
-	DefaultIgnoreFlags = IgnoreDeliver | IgnoreQuarantine
+	DefaultIgnoreFlags = IgnoreDeliver | IgnoreQuarantine | IgnoreDiscard
 )
 
 // Handler is the core logic of a middleware, processing the session context.
@@ -65,14 +69,14 @@ func (mc MiddlewareChain) Execute(ctx *Context) (action Action, err error) {
 
 	for _, m := range mc {
 		// If the context's current status bit overlaps with the middleware's ignore flags, skip this middleware.
-		if (m.IgnoreFlags & ctx.Status) != 0 {
+		if (m.IgnoreFlags & ctx.Action) != 0 {
 			continue
 		}
 
-		ctx.Status = m.Handler(ctx)
-		if ctx.Status == Reject { // Reject is a terminal state.
-			return ctx.Status, nil
+		ctx.Action = m.Handler(ctx)
+		if ctx.Action == Reject { // Reject is a terminal state.
+			return ctx.Action, nil
 		}
 	}
-	return ctx.Status, nil
+	return ctx.Action, nil
 }

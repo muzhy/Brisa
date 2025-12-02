@@ -19,6 +19,11 @@ const (
 	ChainMailFrom ChainType = "mail_from"
 	ChainRcptTo   ChainType = "rcpt_to"
 	ChainData     ChainType = "data"
+	// Deliver Quarantine Reject 用于定义确定Action之后要执行的动作
+	ChainDeliver    ChainType = "deliver"
+	ChainQuarantine ChainType = "quarantine"
+	ChainReject     ChainType = "reject"
+	ChainDiscard    ChainType = "discard"
 )
 
 var (
@@ -33,30 +38,52 @@ var (
 // of the entire instance.
 type Router map[ChainType]MiddlewareChain
 
-// Use adds a middleware to the specified chain.
-func (r *Router) Use(chainName ChainType, m *Middleware) *Router {
-	(*r)[chainName] = append((*r)[chainName], *m)
+// Use adds one or more middlewares to the specified chain.
+func (r *Router) Use(chainName ChainType, middlewares ...*Middleware) *Router {
+	for _, m := range middlewares {
+		(*r)[chainName] = append((*r)[chainName], *m)
+	}
 	return r
 }
 
 // OnConn adds a middleware to the Conn chain.
-func (r *Router) OnConn(m *Middleware) *Router {
-	return r.Use(ChainConn, m)
+func (r *Router) OnConn(m ...*Middleware) *Router {
+	return r.Use(ChainConn, m...)
 }
 
 // OnMailFrom adds a middleware to the MailFrom chain.
-func (r *Router) OnMailFrom(m *Middleware) *Router {
-	return r.Use(ChainMailFrom, m)
+func (r *Router) OnMailFrom(m ...*Middleware) *Router {
+	return r.Use(ChainMailFrom, m...)
 }
 
 // OnRcptTo adds a middleware to the RcptTo chain.
-func (r *Router) OnRcptTo(m *Middleware) *Router {
-	return r.Use(ChainRcptTo, m)
+func (r *Router) OnRcptTo(m ...*Middleware) *Router {
+	return r.Use(ChainRcptTo, m...)
 }
 
 // OnData adds a middleware to the Data chain.
-func (r *Router) OnData(m *Middleware) *Router {
-	return r.Use(ChainData, m)
+func (r *Router) OnData(m ...*Middleware) *Router {
+	return r.Use(ChainData, m...)
+}
+
+// OnDeliver adds one or more middlewares to the Deliver chain.
+func (r *Router) OnDeliver(m ...*Middleware) *Router {
+	return r.Use(ChainDeliver, m...)
+}
+
+// OnQuarantine adds one or more middlewares to the Quarantine chain.
+func (r *Router) OnQuarantine(m ...*Middleware) *Router {
+	return r.Use(ChainQuarantine, m...)
+}
+
+// OnReject adds one or more middlewares to the Reject chain.
+func (r *Router) OnReject(m ...*Middleware) *Router {
+	return r.Use(ChainReject, m...)
+}
+
+// OnDiscard adds one or more middlewares to the Discard chain.
+func (r *Router) OnDiscard(m ...*Middleware) *Router {
+	return r.Use(ChainDiscard, m...)
 }
 
 // Clone creates a deep copy of the Router.
@@ -113,10 +140,11 @@ func (b *Brisa) NewSession(c *smtp.Conn) (smtp.Session, error) {
 	ctx.Logger = b.logger.With("session_id", id)
 
 	s := &Session{
-		ctx:    ctx,
-		id:     id,
-		conn:   c,
-		router: b.router.Load(),
+		ctx:        ctx,
+		id:         id,
+		conn:       c,
+		router:     b.router.Load(),
+		baseLogger: ctx.Logger,
 	}
 	// Link session back to context
 	s.ctx.Session = s
@@ -131,10 +159,11 @@ func (b *Brisa) NewSession(c *smtp.Conn) (smtp.Session, error) {
 
 // ------- Session ---------
 type Session struct {
-	ctx    *Context
-	id     string
-	conn   *smtp.Conn
-	router *Router
+	ctx        *Context
+	id         string
+	conn       *smtp.Conn
+	router     *Router
+	baseLogger *slog.Logger
 }
 
 func (s *Session) GetClientIP() net.Addr {
@@ -143,44 +172,84 @@ func (s *Session) GetClientIP() net.Addr {
 
 // Mail is called when a sender is specified.
 func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
-	//TODO new email, one session may have mulit email, need generate id for email
-	s.ctx.Logger.Info("MAIL FROM command received", "from", from)
+	// generate mail_id for each email
+	mailId := uuid.NewString()
+	s.ctx.Logger = s.baseLogger.With("mail_id", mailId)
+
+	s.ctx.From = from
+	s.ctx.FromOptions = opts
 	return s.execute(ChainMailFrom)
 }
 
 // Rcpt is called for each recipient.
 func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
-	s.ctx.Logger.Info("RCPT TO command received", "to", to)
+	s.ctx.To = to
+	s.ctx.ToOptions = opts
 	return s.execute(ChainRcptTo)
 }
 
 // Data is called when a message is received.
 func (s *Session) Data(r io.Reader) error {
 	s.ctx.Reader = r
+	defer func() {
+		// Ensure the reader is always consumed to avoid client timeout.
+		// If no middleware consumes it, discard the data.
+		// This is a safe fallback. A dedicated middleware should ideally handle this.
+		io.Copy(io.Discard, s.ctx.Reader)
+	}()
 
 	err := s.execute(ChainData)
-
 	if err != nil {
 		return err
-	} else {
-		if s.ctx.Status == Pass {
-			s.ctx.Status = Deliver
-		}
 	}
 
-	// TODO handle action
+	// If after all data middleware, the status is still Pass, it means no middleware
+	// made a final decision (like Deliver, Quarantine, or Reject).
+	// In this case, we can treat it as an implicit delivery.
+	if s.ctx.Action == Pass {
+		s.ctx.Action = Deliver
+	}
+
+	switch s.ctx.Action {
+	case Deliver:
+		err := s.execute(ChainDeliver)
+		if err != nil {
+			return err
+		}
+	case Quarantine:
+		err := s.execute(ChainQuarantine)
+		if err != nil {
+			return err
+		}
+	case Discard:
+		err := s.execute(ChainDiscard)
+		if err != nil {
+			// Errors in the Discard chain probably shouldn't fail the SMTP transaction,
+			// as the intent is to successfully receive and then drop the mail.
+			s.ctx.Logger.Error("discard middleware execute failed", "error", err)
+		}
+	default:
+		s.ctx.Logger.Error("Should never here. Illegal action in data finised middleware chain", "action", s.ctx.Action)
+		return ErrRejected
+	}
 
 	return nil
 }
 
 // Reset is called when a transaction is aborted.
 func (s *Session) Reset() {
-	// TODO
+	s.resetMailTransaction()
+}
+
+// resetMailTransaction resets the state for a single mail transaction,
+// allowing the session to be reused for another mail.
+func (s *Session) resetMailTransaction() {
+	s.ctx.ResetMailFields()
+	s.ctx.Logger = s.baseLogger // Revert to the session-level logger.
 }
 
 // Logout is called when a client closes the connection.
 func (s *Session) Logout() error {
-	s.ctx.Logger.Info("Session closed")
 	FreeContext(s.ctx)
 
 	return nil
@@ -197,9 +266,17 @@ func (s *Session) execute(chainType ChainType) error {
 
 	if action, err := chain.Execute(s.ctx); err != nil || action == Reject {
 		if err != nil {
-			s.ctx.Logger.Error("middleware panicked, rejecting command", "error", err, "ChainType", string(chainType))
+			s.ctx.Logger.Error("middleware execute failed, rejecting command", "error", err, "ChainType", string(chainType))
 		}
-		s.ctx.Status = Reject // Ensure context reflects the final decision.
+		s.ctx.Action = Reject // Ensure context reflects the final decision.
+		// execute reject chain
+		rejectChain, ok := (*s.router)[ChainReject]
+		if ok {
+			_, err := rejectChain.Execute(s.ctx)
+			if err != nil {
+				s.ctx.Logger.Error("reject middleware execute failed", "error", err)
+			}
+		}
 		return ErrRejected
 	}
 

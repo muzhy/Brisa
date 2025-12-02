@@ -149,7 +149,7 @@ func TestMiddlewareChain_Execute(t *testing.T) {
 			chain := MiddlewareChain(tc.setupMiddlewares(t, calls))
 
 			ctx := NewContext()
-			ctx.Status = tc.initialCtxStatus
+			ctx.Action = tc.initialCtxStatus
 			defer FreeContext(ctx)
 
 			finalAction, err := chain.Execute(ctx)
