@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"sync/atomic"
+	"time"
 
 	"github.com/emersion/go-smtp"
 	"github.com/google/uuid"
@@ -103,18 +104,20 @@ func (r *Router) Clone() *Router {
 
 // Brisa implements SMTP server methods.
 type Brisa struct {
-	router atomic.Pointer[Router]
-	logger *slog.Logger
+	router    atomic.Pointer[Router]
+	logger    *slog.Logger
+	observers []Observer
 }
 
-// New creates a new Brisa instance with initial router
-func New(logger *slog.Logger) *Brisa {
+// New creates a new Brisa instance with an initial logger and optional observers.
+func New(logger *slog.Logger, observers ...Observer) *Brisa {
 	if logger == nil {
 		logger = slog.Default()
 	}
 
 	b := &Brisa{
-		logger: logger,
+		logger:    logger,
+		observers: observers,
 	}
 	// Initialize with empty chains.
 	b.router.Store(&Router{})
@@ -145,9 +148,14 @@ func (b *Brisa) NewSession(c *smtp.Conn) (smtp.Session, error) {
 		conn:       c,
 		router:     b.router.Load(),
 		baseLogger: ctx.Logger,
+		observers:  b.observers,
 	}
 	// Link session back to context
 	s.ctx.Session = s
+
+	for _, o := range b.observers {
+		o.OnSessionStart(s.ctx)
+	}
 
 	err := s.execute(ChainConn)
 	if err != nil {
@@ -164,6 +172,7 @@ type Session struct {
 	conn       *smtp.Conn
 	router     *Router
 	baseLogger *slog.Logger
+	observers  []Observer
 }
 
 func (s *Session) GetClientIP() net.Addr {
@@ -250,6 +259,9 @@ func (s *Session) resetMailTransaction() {
 
 // Logout is called when a client closes the connection.
 func (s *Session) Logout() error {
+	for _, o := range s.observers {
+		o.OnSessionEnd(s.ctx)
+	}
 	FreeContext(s.ctx)
 
 	return nil
@@ -264,7 +276,19 @@ func (s *Session) execute(chainType ChainType) error {
 		return nil
 	}
 
-	if action, err := chain.Execute(s.ctx); err != nil || action == Reject {
+	for _, o := range s.observers {
+		o.OnChainStart(s.ctx, chainType)
+	}
+	startTime := time.Now()
+
+	action, err := chain.Execute(s.ctx)
+
+	duration := time.Since(startTime)
+	for _, o := range s.observers {
+		o.OnChainEnd(s.ctx, chainType, duration)
+	}
+
+	if err != nil || action == Reject {
 		if err != nil {
 			s.ctx.Logger.Error("middleware execute failed, rejecting command", "error", err, "ChainType", string(chainType))
 		}
@@ -272,6 +296,8 @@ func (s *Session) execute(chainType ChainType) error {
 		// execute reject chain
 		rejectChain, ok := (*s.router)[ChainReject]
 		if ok {
+			// We treat the execution of the reject chain as a separate, internal process.
+			// We can also wrap it with observers if detailed monitoring of rejections is needed.
 			_, err := rejectChain.Execute(s.ctx)
 			if err != nil {
 				s.ctx.Logger.Error("reject middleware execute failed", "error", err)
