@@ -15,8 +15,8 @@ type Context struct {
 
 	From        string
 	FromOptions *smtp.MailOptions
-	To          string
-	ToOptions   *smtp.RcptOptions
+	To          []string
+	ToOptions   []*smtp.RcptOptions
 
 	Reader io.Reader
 	// Action stores the cumulative status during the execution of the middleware chain.
@@ -41,9 +41,15 @@ func (c *Context) Reset() {
 func (c *Context) ResetMailFields() {
 	c.Reader = nil
 	c.From = ""
-	c.To = ""
+	c.To = nil
 	c.FromOptions = nil
 	c.ToOptions = nil
+	c.Action = Pass // Reset to the initial state for the new transaction
+
+	c.mu.Lock()
+	// Clear the keys map for the new transaction to prevent state leakage.
+	c.keys = nil
+	c.mu.Unlock()
 }
 
 // Set stores a new key-value pair in the context.

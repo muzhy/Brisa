@@ -27,11 +27,6 @@ const (
 	ChainDiscard    ChainType = "discard"
 )
 
-var (
-	// ErrRejected is returned when a middleware rejects the connection.
-	ErrRejected = errors.New("rejected by middleware")
-)
-
 // Router holds all named middleware chains for the Brisa server.
 // It's used to build a complete set of middleware chains that can be atomically
 // applied to a Brisa instance. It is not safe for concurrent use; concurrency
@@ -159,7 +154,7 @@ func (b *Brisa) NewSession(c *smtp.Conn) (smtp.Session, error) {
 
 	err := s.execute(ChainConn)
 	if err != nil {
-		return nil, ErrRejected
+		return nil, err
 	}
 
 	return s, nil
@@ -181,6 +176,8 @@ func (s *Session) GetClientIP() net.Addr {
 
 // Mail is called when a sender is specified.
 func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
+	s.resetMailTransaction()
+
 	// generate mail_id for each email
 	mailId := uuid.NewString()
 	s.ctx.Logger = s.baseLogger.With("mail_id", mailId)
@@ -192,8 +189,8 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 
 // Rcpt is called for each recipient.
 func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
-	s.ctx.To = to
-	s.ctx.ToOptions = opts
+	s.ctx.To = append(s.ctx.To, to)
+	s.ctx.ToOptions = append(s.ctx.ToOptions, opts)
 	return s.execute(ChainRcptTo)
 }
 
@@ -239,7 +236,7 @@ func (s *Session) Data(r io.Reader) error {
 		}
 	default:
 		s.ctx.Logger.Error("Should never here. Illegal action in data finised middleware chain", "action", s.ctx.Action)
-		return ErrRejected
+		return ErrInvalidAction
 	}
 
 	return nil
@@ -289,21 +286,31 @@ func (s *Session) execute(chainType ChainType) error {
 	}
 
 	if err != nil || action == Reject {
-		if err != nil {
-			s.ctx.Logger.Error("middleware execute failed, rejecting command", "error", err, "ChainType", string(chainType))
-		}
 		s.ctx.Action = Reject // Ensure context reflects the final decision.
-		// execute reject chain
-		rejectChain, ok := (*s.router)[ChainReject]
-		if ok {
-			// We treat the execution of the reject chain as a separate, internal process.
-			// We can also wrap it with observers if detailed monitoring of rejections is needed.
-			_, err := rejectChain.Execute(s.ctx)
-			if err != nil {
-				s.ctx.Logger.Error("reject middleware execute failed", "error", err)
+
+		// Execute reject chain if it exists.
+		// Errors from the reject chain are logged but not returned to the client,
+		// as a primary decision to reject has already been made.
+		if rejectChain, ok := (*s.router)[ChainReject]; ok {
+			if _, rejectErr := rejectChain.Execute(s.ctx); rejectErr != nil {
+				s.ctx.Logger.Error("reject middleware execute failed", "error", rejectErr)
 			}
 		}
-		return ErrRejected
+
+		// Determine which SMTP error to return.
+		if err != nil {
+			s.ctx.Logger.Error("middleware execute failed, rejecting command", "error", err, "ChainType", string(chainType))
+			// If the middleware returned a specific smtp.SMTPError, use it.
+			var smtpErr *smtp.SMTPError
+			if errors.As(err, &smtpErr) {
+				return smtpErr
+			}
+			// Otherwise, it was likely a panic, so return a generic internal server error.
+			return ErrInternalServer
+		}
+
+		// If there was no error but the action is Reject, return the default policy rejection.
+		return ErrRejectedByPolicy
 	}
 
 	return nil

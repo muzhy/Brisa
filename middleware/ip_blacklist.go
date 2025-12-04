@@ -1,9 +1,10 @@
 package middleware
 
 import (
-	"github.com/muzhy/brisa"
 	"fmt"
 	"net"
+
+	"github.com/muzhy/brisa"
 )
 
 type IPBlacklist struct {
